@@ -4,12 +4,19 @@
   "description": "IDE-style autocomplete popup for the terminal",
   "keywords": [
     "zsh",
+    "zsh-plugin",
     "autocomplete",
+    "autocompletion",
     "completion",
+    "tab-completion",
     "terminal",
     "shell",
-    "fig",
-    "popup"
+    "cli",
+    "command-line",
+    "intellisense",
+    "popup",
+    "oh-my-zsh",
+    "developer-tools"
   ],
   "license": "MIT",
   "author": "Aayush Agrawal",
