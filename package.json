@@ -1,0 +1,53 @@
+{
+  "name": "shellsense",
+  "version": "0.1.1",
+  "description": "IDE-style autocomplete popup for the terminal",
+  "keywords": [
+    "zsh",
+    "autocomplete",
+    "completion",
+    "terminal",
+    "shell",
+    "fig",
+    "popup"
+  ],
+  "license": "MIT",
+  "author": "Aayush Agrawal",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePubDoc/shellsense.git"
+  },
+  "homepage": "https://github.com/ThePubDoc/shellsense#readme",
+  "bugs": "https://github.com/ThePubDoc/shellsense/issues",
+  "type": "module",
+  "bin": {
+    "shellsense": "bin/shellsense"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "shell",
+    "shellsense.plugin.zsh"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "node --test 'test/*.test.ts'",
+    "test:e2e": "test/e2e.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@withfig/autocomplete": "^2.692.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

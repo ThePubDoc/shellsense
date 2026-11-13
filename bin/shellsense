@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs the shellsense CLI with Node, wherever this script is symlinked from.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+node=${SHELLSENSE_NODE:-node}
+command -v "$node" >/dev/null 2>&1 || { echo "shellsense: Node.js is required but '$node' was not found" >&2; exit 127; }
+# A source checkout runs the TypeScript directly (Node 23.6+); the published package ships compiled JavaScript.
+if [ -f "$root/src/cli.ts" ]; then
+  exec "$node" "$root/src/cli.ts" "$@"
+fi
+exec "$node" "$root/dist/cli.js" "$@"
