@@ -41,6 +41,15 @@ Status: early. zsh only for now, developed and tested on macOS.
 
 ## Install
 
+With Homebrew:
+
+```sh
+brew install thepubdoc/tap/shellsense
+shellsense setup
+```
+
+Or with npm:
+
 ```sh
 npm install -g shellsense
 shellsense setup
@@ -52,8 +61,8 @@ Open a new terminal and type `git ` followed by a letter.
 again. The engine starts by itself on the first prompt, stays in the background, and exits
 after 30 minutes with no shells connected.
 
-Requirements: zsh 5.9 or later, Node.js 20 or later, macOS or Linux. The completion specs make
-the install about 140 MB.
+Requirements: zsh 5.9 or later, Node.js 20 or later, macOS or Linux. Homebrew installs Node for
+you. The completion specs make the install about 140 MB.
 
 ### With a zsh plugin manager
 
@@ -215,7 +224,7 @@ A source checkout runs `src/*.ts` directly; the published package contains the c
 - bash and fish.
 - Suggestions for the command name itself.
 - An optional native floating window on macOS.
-- A Homebrew formula, and a single binary so Node is not needed at run time.
+- A single binary, so Node is not needed at run time.
 - zsh older than 5.9.
 
 ## Acknowledgements
