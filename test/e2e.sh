@@ -122,8 +122,16 @@ shows "Enter on that row changes into the folder" "work/src\$"
 keys 'cd ..' Enter
 keys 'cd '
 shows "popup is open with no word started" 'docs/'
+shows "the folder visited a moment ago is marked as recent" 'recent'
 keys Enter
-line_is "Enter takes the top row even when no word has been started" '% cd docs/'
+line_is "and is the top row, which Enter takes" '% cd src/'
+keys C-u
+
+keys 'git stash list' Enter
+keys 'git '
+shows "a subcommand that was run is marked as recent" 'recent'
+keys Enter
+line_is "and is offered first" '% git stash'
 keys C-u
 
 [ $failed -eq 0 ] && echo "all end-to-end checks passed"

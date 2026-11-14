@@ -23,7 +23,26 @@ export interface Parsed {
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-export function tokenize(input: string): Parsed {
+/** The words that make up a command: no redirect targets, no leading `VAR=value`. */
+function commandWords(tokens: Token[]): Token[] {
+  const words = tokens.filter((t) => !t.redirect);
+  while (words.length > 0 && ASSIGNMENT.test(words[0]!.text)) words.shift();
+  return words;
+}
+
+interface Scan {
+  /** Commands that ended at a separator (`;`, `|`, `&&`, …), in order. */
+  earlier: Token[][];
+  /** Completed words of the last command. */
+  tokens: Token[];
+  /** The unfinished last word, if the input does not end in whitespace. */
+  last: Token | null;
+  quote: Quote;
+  redirectNext: boolean;
+}
+
+function scan(input: string): Scan {
+  const earlier: Token[][] = [];
   let tokens: Token[] = [];
   let cur: Token | null = null;
   let quote: Quote = "";
@@ -41,8 +60,9 @@ export function tokenize(input: string): Parsed {
   };
   // A command separator: everything typed so far belongs to an earlier command.
   const reset = () => {
+    finish();
+    if (tokens.length > 0) earlier.push(tokens);
     tokens = [];
-    cur = null;
     redirectNext = false;
     quote = "";
   };
@@ -101,11 +121,19 @@ export function tokenize(input: string): Parsed {
     }
     (cur ?? begin(i)).text += c;
   }
+  return { earlier, tokens, last: cur, quote, redirectNext };
+}
 
-  const current: Token = cur ?? { text: "", start: n, quote: "", redirect: redirectNext };
+export function tokenize(input: string): Parsed {
+  const { tokens, last, quote, redirectNext } = scan(input);
+  const current: Token = last ?? { text: "", start: input.length, quote: "", redirect: redirectNext };
   current.quote = quote;
+  return { tokens: commandWords(tokens), current };
+}
 
-  const words = tokens.filter((t) => !t.redirect);
-  while (words.length > 0 && ASSIGNMENT.test(words[0]!.text)) words.shift();
-  return { tokens: words, current };
+/** Every command on a finished line, as plain words: `cd src && git status` gives two. */
+export function splitCommands(line: string): string[][] {
+  const { earlier, tokens, last } = scan(line);
+  const all = [...earlier, last ? [...tokens, last] : tokens];
+  return all.map((command) => commandWords(command).map((t) => t.text)).filter((words) => words.length > 0);
 }

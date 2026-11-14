@@ -11,13 +11,15 @@ description. Pick one with the arrow keys or keep typing to narrow the list.
 
 ```
 ❯ git commit -
-     ╭──────────────────────────────────────────────────────────────────────────╮
-     │  -m, --message     Use the given message as the commit message          ┃
-     │  -a, --all         Stage all modified and deleted paths                 │
-     ┃  -v, --verbose     Show unified diff of all file changes                │
-     │  -p, --patch       Use the interactive patch selection interface to ch… │
-     ╰─ 3/41 ──────────────────────────────────────────────────────── ↵ insert ─╯
+      -m, --message       Use the given message as the commit message
+      -a, --all                  Stage all modified and deleted paths
+    ❨ -v, --verbose             Show unified diff of all file changes ❩
+      -p, --patch       Use the interactive patch selection interface…
+      option   3/41                             ↵ insert   esc close
 ```
+
+The popup is a filled card with a soft shadow, so it reads as floating above the terminal; the
+highlighted row is a solid bar in your terminal's bright blue.
 
 ## Features
 
@@ -25,6 +27,8 @@ description. Pick one with the arrow keys or keep typing to narrow the list.
   `brew` and many more, including their subcommands, options and argument values.
 - **Live values**: git branches, npm scripts, files and folders are looked up as you type.
 - **Understands your aliases**: `gco` completes as `git checkout` if that is what it stands for.
+- **Learns what you use**: subcommands, options, branches and folders you used recently are
+  offered first.
 - **Drawn inside the terminal**: no extra window, no accessibility permission, nothing tied to
   one terminal emulator.
 - **Matches your theme**: colours are derived from the terminal's own background, foreground
@@ -85,7 +89,7 @@ they were bound to before.
 | `Enter` | Insert the highlighted row (the top one until you use the arrows). Runs the line instead when the word is already complete |
 | `Esc` | Close the popup for the word being typed |
 
-With the default box, the bottom edge says what `Enter` will do: `↵ insert` or `↵ run`.
+The footer says what `Enter` will do: `↵ insert` or `↵ run`.
 
 Inside a folder you have already typed (`cd src/`), the first row is `.` — the folder itself —
 so `Enter` goes there and `↓` reaches the folders inside it.
@@ -102,26 +106,31 @@ Set these in `~/.zshrc`, above the shellsense block.
 | --- | --- | --- |
 | `SHELLSENSE_MAX_ROWS` | `8` | Rows shown at once |
 | `SHELLSENSE_ENTER` | `insert` | `run` makes Enter always run the line unless a row was picked with the arrows |
-| `SHELLSENSE_HINTS` | `1` | `0` removes the labels on the bottom edge (position in the list, and what Enter will do) |
+| `SHELLSENSE_HISTORY` | `1` | `0` stops this shell from recording what you run and from ranking by it |
+| `SHELLSENSE_HINTS` | `1` | `0` removes the footer (what the highlighted row is, the position in the list, and what the keys do) |
+| `SHELLSENSE_DETAIL` | `1` | Outlined styles only: `0` removes the section under the list that shows a long description in full |
 
 ### Appearance
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SHELLSENSE_BOX` | `rounded` | `rounded` is an outlined box on the terminal's background, `card` is outlined and filled, `flat` is a filled panel with no outline |
+| `SHELLSENSE_BOX` | `floating` | `floating` is a filled card with a shadow, `rounded` is an outlined box on the terminal's background, `card` is outlined and filled, `flat` is a plain filled panel |
 | `SHELLSENSE_ICONS` | `auto` | `nerd`, `dots` or `none`. `auto` uses Nerd Font icons when powerlevel10k is set up for one, coloured dots otherwise |
 | `SHELLSENSE_THEME` | `auto` | `dark` or `light` for fixed 256-colour shades. `auto` derives the shades from the terminal's own colours |
-| `SHELLSENSE_ACCENT` | `4` | Colour of the selection marker and of the characters you typed: a palette number (4 is your theme's blue) or `#rrggbb` |
+| `SHELLSENSE_ACCENT` | `12` | Colour of the highlighted row and of the characters you typed: a palette number (12 is your theme's bright blue) or `#rrggbb` |
 | `SHELLSENSE_PADDING` | `1` | `flat` only: `0` removes the half-height padding above and below the list |
-| `SHELLSENSE_COLOR_PANEL`, `_SELECTED`, `_DIM`, `_THUMB`, `_BORDER` | unset | Override one shade: a palette number or `#rrggbb` |
+| `SHELLSENSE_COLOR_PANEL`, `_STRIP`, `_SHADOW`, `_SELECTED`, `_SELECTED_TEXT`, `_DIM`, `_THUMB`, `_BORDER` | unset | Override one shade: a palette number or `#rrggbb` |
 
 Once per shell, shellsense asks the terminal for its background, foreground and accent colour.
-The panel is the background nudged towards the foreground, the highlighted row is the
-background tinted with the accent, and the icons use palette colours 1–6. Terminals that do not
-answer get fixed 256-colour shades.
+The card, its footer strip and its shadow are shades of the terminal's own background, so the
+popup belongs to whatever theme is in use, light or dark. The highlighted row is a solid bar of
+the accent colour with white text (dark text if the accent is a light colour), with rounded
+ends when a Nerd Font is in use. Icons use palette colours 1–6. Terminals that do not answer
+get fixed 256-colour shades.
 
-The box itself carries the state: the highlighted row is marked by a heavier stroke on the left
-edge, the right edge is the scrollbar, and the bottom edge shows where you are in a long list.
+Descriptions sit against the right edge and are cut to fit. The right margin of the card is the
+scrollbar, and the footer says what the highlighted row is, where you are in a long list, and
+what `Enter` will do.
 
 ### Advanced
 
@@ -141,10 +150,29 @@ shellsense uninstall         turn it off (removes the line, stops the engine)
 shellsense status            is the engine running?
 shellsense stop              stop it (the next prompt starts a fresh one)
 shellsense suggest 'git ch'  print what the engine would suggest, without a shell
+shellsense forget            erase what shellsense remembers about what you used
 shellsense init zsh          print the line that loads the popup, to place it yourself
 ```
 
 After upgrading, run `shellsense stop` so shells pick up the new engine.
+
+## History
+
+Rows you have used before are offered first: `git ` puts the subcommands you actually run at
+the top, `git checkout ` the branches you switch to, and `cd ` the folders you visit. Among
+used rows, the ones used most recently and most often come first. What you type still decides
+first; history only orders rows that match equally well. The footer marks such a row as
+`recent`.
+
+- **What is recorded.** Each word of a command you run, together with where in the command it
+  was used, and each folder you change into. The first time the engine starts it also reads the
+  latest 1,500 lines of your zsh history file, so ranking is useful from the start.
+- **How it is stored.** As hashes with a count and a time, in
+  `~/.local/state/shellsense/usage.json`. The words themselves are never written, so a token
+  or password that appeared on a command line is not in that file.
+- **Keeping a command out.** Start the line with a space, the usual zsh convention.
+- **Turning it off.** `SHELLSENSE_HISTORY=0` in `~/.zshrc`. `shellsense forget` erases
+  everything recorded so far.
 
 ## Troubleshooting
 
@@ -185,7 +213,7 @@ A source checkout runs `src/*.ts` directly; the published package contains the c
 ## Roadmap
 
 - bash and fish.
-- Suggestions for the command name itself, and ranking by your history.
+- Suggestions for the command name itself.
 - An optional native floating window on macOS.
 - A Homebrew formula, and a single binary so Node is not needed at run time.
 - zsh older than 5.9.

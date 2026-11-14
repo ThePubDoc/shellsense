@@ -94,6 +94,8 @@ export interface Item {
   /** The part of `display` that matches what was typed, in code points, for highlighting. */
   matchStart: number;
   matchLength: number;
+  /** True when this row was used here before, which is why it ranks above the others. */
+  recent: boolean;
 }
 
 export interface Result {

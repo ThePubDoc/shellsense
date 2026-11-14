@@ -23,7 +23,7 @@ const MAX_ENTRIES = 2000;
 const CACHE_MS = 1000;
 const cache = new Map<string, { at: number; entries: Promise<FileEntry[]> }>();
 
-function expandHome(dir: string): string {
+export function expandHome(dir: string): string {
   if (dir === "~" || dir.startsWith("~/")) return path.join(os.homedir(), dir.slice(1));
   return dir;
 }

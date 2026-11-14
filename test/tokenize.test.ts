@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tokenize } from "../src/tokenize.ts";
+import { splitCommands, tokenize } from "../src/tokenize.ts";
 
 const words = (input: string) => tokenize(input).tokens.map((t) => t.text);
 const current = (input: string) => tokenize(input).current;
@@ -40,4 +40,13 @@ test("redirect targets are marked and left out of the command", () => {
 
 test("leading variable assignments are not the command", () => {
   assert.deepEqual(words("FOO=1 BAR=2 npm run "), ["npm", "run"]);
+});
+
+test("a finished line is split into every command on it", () => {
+  assert.deepEqual(splitCommands("cd src && git status"), [
+    ["cd", "src"],
+    ["git", "status"],
+  ]);
+  assert.deepEqual(splitCommands('FOO=1 npm run "my script" | tee out.log > /dev/null; ls'), [["npm", "run", "my script"], ["tee", "out.log"], ["ls"]]);
+  assert.deepEqual(splitCommands(""), []);
 });

@@ -7,6 +7,8 @@ import { findOption, resolve } from "./resolve.ts";
 import type { Context } from "./resolve.ts";
 import { specNames } from "./specs.ts";
 import { tokenize } from "./tokenize.ts";
+import { absolutePath, pathKey, wordKey } from "./usage.ts";
+import type { Usage } from "./usage.ts";
 import type { Quote, Token } from "./tokenize.ts";
 import type { Arg, ExecuteCommand, FigSuggestion, Generator, Item, Kind, Option, Result, Template } from "./types.ts";
 import { toArray } from "./types.ts";
@@ -18,13 +20,15 @@ export interface Request {
   cwd: string;
   env: NodeJS.ProcessEnv;
   aliases: Map<string, string>;
+  /** What was used before. When given, rows used here before are ranked first. */
+  usage?: Usage;
 }
 
 /** Called once with everything that is ready quickly, and again when slow generators finish. */
 export type Emit = (result: Result, final: boolean) => void;
 
 const MAX_ITEMS = 60;
-const MAX_DESCRIPTION = 100;
+const MAX_DESCRIPTION = 160;
 /** Results that arrive within this window are sent in one reply instead of two. */
 const FAST_MS = 25;
 const DEADLINE_MS = 6000;
@@ -55,6 +59,8 @@ interface Group {
   /** Part of the token that stays in front of the inserted value, e.g. `--color=`. */
   prefix: string;
   fuzzy: boolean;
+  /** For file listings: the folder part of the token as typed, e.g. `src/`. */
+  dir?: string;
 }
 
 function describe(text: unknown): string {
@@ -145,7 +151,7 @@ async function fileGroup(
       final: prefix + quoted + (entry.isDir ? "" : " "),
     };
   });
-  return { candidates, query: listing.query, prefix: "", fuzzy: false };
+  return { candidates, query: listing.query, prefix: "", fuzzy: false, dir: listing.dirPart };
 }
 
 function queryFor(generator: Generator, token: string): { query: string; kept: string } {
@@ -284,8 +290,8 @@ function matchSpan(display: string, name: string, query: string): { matchStart: 
   return { matchStart: Array.from(display.slice(0, nameAt + queryAt)).length, matchLength: Array.from(query).length };
 }
 
-function toItem(candidate: Candidate, name: string, prefix: string, quote: Quote, query: string): Item {
-  const base = { display: candidate.display, description: candidate.description, kind: candidate.kind, ...matchSpan(candidate.display, name, query) };
+function toItem(candidate: Candidate, name: string, prefix: string, quote: Quote, query: string, recent: boolean): Item {
+  const base = { display: candidate.display, description: candidate.description, kind: candidate.kind, recent, ...matchSpan(candidate.display, name, query) };
   if (candidate.final !== undefined) return { ...base, insert: candidate.final, cursorBack: 0 };
 
   // Paths that come from a spec's own generator (as `cd` does) are plain names and still need quoting.
@@ -319,9 +325,22 @@ function toItem(candidate: Candidate, name: string, prefix: string, quote: Quote
  * one of the rows in full, which is what tells the shell that Enter should run the line rather
  * than insert the highlighted row. In every other case Enter takes the highlighted row.
  */
-function build(groups: Group[], current: Token): { items: Item[]; complete: boolean } {
+/** Where to look up what was used before: the store, the place in the command, and the folder. */
+interface Boost {
+  usage: Usage;
+  context: string;
+  cwd: string;
+}
+
+/** The place a word is used in, e.g. `git checkout`, or `git checkout -b` for the value of an option. */
+export function usageContext(ctx: Context): string {
+  return (ctx.optionArg ? [...ctx.path, toArray(ctx.optionArg.option.name)[0] ?? ""] : ctx.path).join(" ");
+}
+
+function build(groups: Group[], current: Token, boost: Boost | null): { items: Item[]; complete: boolean } {
   const token = current.text;
-  const scored: { item: Item; rank: number; priority: number; order: number }[] = [];
+  const now = Date.now();
+  const scored: { item: Item; rank: number; used: number; priority: number; order: number }[] = [];
   let order = 0;
   let complete = false;
   let insideFolder = false;
@@ -340,10 +359,24 @@ function build(groups: Group[], current: Token): { items: Item[]; complete: bool
       if (isPath && candidate.names[0]!.startsWith(".") && !group.query.startsWith(".")) continue;
       // `cd src` next to a `src/` row is as complete as an exact match.
       if (found.rank === 0 || (candidate.kind === "folder" && candidate.names.includes(`${group.query}/`))) complete = true;
-      scored.push({ item: toItem(candidate, found.name, group.prefix, current.quote, group.query), rank: found.rank, priority: candidate.priority, order: order++ });
+      // Files and folders are remembered by where they are, everything else by the word and its place.
+      let used = 0;
+      if (boost && isPath) {
+        used = boost.usage.score(pathKey(absolutePath(boost.cwd, (group.dir ?? group.prefix) + (candidate.insertValue ?? found.name))), now);
+      } else if (boost) {
+        for (const name of candidate.names) used = Math.max(used, boost.usage.score(wordKey(boost.context, name), now));
+      }
+      scored.push({
+        item: toItem(candidate, found.name, group.prefix, current.quote, group.query, used > 0),
+        rank: found.rank,
+        used,
+        priority: candidate.priority,
+        order: order++,
+      });
     }
   }
-  scored.sort((a, b) => a.rank - b.rank || b.priority - a.priority || a.order - b.order);
+  // How well the row matches what was typed comes first; among equals, what was used before.
+  scored.sort((a, b) => a.rank - b.rank || b.used - a.used || b.priority - a.priority || a.order - b.order);
 
   const items: Item[] = [];
   const seen = new Set<string>();
@@ -359,9 +392,16 @@ function build(groups: Group[], current: Token): { items: Item[]; complete: bool
   // highlighted choice is "stay here" and the folders inside it are one arrow key away. Enter on
   // it changes nothing on the line, which the shell takes as "run".
   if (insideFolder && items.length > 0) {
-    items.unshift({ display: ".", description: describe(token), kind: "folder", insert: quotePath(token, current.quote, false), cursorBack: 0, matchStart: 0, matchLength: 0 });
+    items.unshift({ display: ".", description: describe(token), kind: "folder", insert: quotePath(token, current.quote, false), cursorBack: 0, matchStart: 0, matchLength: 0, recent: false });
   }
   return { items, complete };
+}
+
+/** The words of a command once aliases are expanded and leading modifiers such as `noglob` are dropped. */
+export function commandWordsOf(words: string[], aliases: Map<string, string>): string[] {
+  let result = expandAliases(words, aliases);
+  while (result.length > 0 && MODIFIERS.has(result[0]!)) result = result.slice(1);
+  return result;
 }
 
 function expandAliases(words: string[], aliases: Map<string, string>): string[] {
@@ -387,21 +427,22 @@ export async function suggest(req: Request, emit: Emit): Promise<void> {
   const parsed = tokenize(text);
   const current = parsed.current;
   const replaceStart = Array.from(text.slice(0, current.start)).length;
-  const send = (groups: Group[], final: boolean) => emit({ replaceStart, ...build(groups, current) }, final);
+  let boost: Boost | null = req.usage ? { usage: req.usage, context: "", cwd: req.cwd } : null;
+  const send = (groups: Group[], final: boolean) => emit({ replaceStart, ...build(groups, current, boost) }, final);
 
   let pending: Promise<Group>[];
   if (current.redirect) {
     pending = [fileGroup(current.text, "", current.quote, req.cwd, false)];
   } else {
-    let words = expandAliases(
+    const words = commandWordsOf(
       parsed.tokens.map((t) => t.text),
       req.aliases,
     );
-    while (words.length > 0 && MODIFIERS.has(words[0]!)) words = words.slice(1);
     // Nothing is offered while the command name itself is being typed.
     if (words.length === 0) return send([], true);
     const exec: ExecuteCommand = (input) => execute(input, { cwd: req.cwd, env: req.env });
     const ctx = await resolve(words, { exec, cwd: req.cwd });
+    if (boost) boost = { ...boost, context: usageContext(ctx) };
     pending = collect(ctx, current, req);
   }
 

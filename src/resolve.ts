@@ -22,11 +22,15 @@ export interface Context {
   afterDashDash: boolean;
   /** Words of the innermost command (after `sudo` and friends), command name first. */
   words: string[];
+  /** The command and the subcommands the words lead through, e.g. `["git", "checkout"]`. */
+  path: string[];
 }
 
 export interface ResolveDeps {
   exec: ExecuteCommand;
   cwd: string;
+  /** Only look at what the spec files say; skip the parts of a spec that run commands. */
+  offline?: boolean;
 }
 
 const GENERATE_SPEC_TTL_MS = 30_000;
@@ -56,7 +60,10 @@ export function findOption(sub: Subcommand, persistent: Option[], name: string):
 
 async function resolveLoadSpec(sub: Subcommand, token: string, deps: ResolveDeps): Promise<Subcommand> {
   let target: unknown = sub.loadSpec;
-  if (typeof target === "function") target = await target(token, deps.exec);
+  if (typeof target === "function") {
+    if (deps.offline) return sub;
+    target = await target(token, deps.exec);
+  }
   if (Array.isArray(target)) target = target[0];
   // A loader may return a location (`{ name: "aws/s3" }`) instead of the spec itself.
   if (target && typeof target === "object" && !("subcommands" in target) && !("options" in target) && !("args" in target)) {
@@ -94,6 +101,7 @@ async function withGeneratedSpec(sub: Subcommand, tokens: string[], deps: Resolv
 /** Applies `loadSpec` and `generateSpec`, the two ways a subcommand defers its definition. */
 async function enter(sub: Subcommand, tokens: string[], deps: ResolveDeps): Promise<Subcommand> {
   let resolved = sub;
+  if (typeof sub.loadSpec === "function" && deps.offline) return sub;
   if (sub.loadSpec !== undefined) {
     let pending = loadedSpecs.get(sub);
     if (!pending) {
@@ -102,7 +110,7 @@ async function enter(sub: Subcommand, tokens: string[], deps: ResolveDeps): Prom
     }
     resolved = await pending;
   }
-  if (typeof resolved.generateSpec === "function") resolved = await withGeneratedSpec(resolved, tokens, deps);
+  if (typeof resolved.generateSpec === "function" && !deps.offline) resolved = await withGeneratedSpec(resolved, tokens, deps);
   return resolved;
 }
 
@@ -117,6 +125,7 @@ type Outcome = { context: Context } | { nested: string[] };
 
 async function walk(root: Subcommand, words: string[], deps: ResolveDeps): Promise<Outcome> {
   let sub = await enter(root, words.slice(0, 1), deps);
+  const path = [commandName(words[0] ?? "")];
   let persistent: Option[] = [];
   let used = new Set<string>();
   let argIndex = 0;
@@ -182,6 +191,7 @@ async function walk(root: Subcommand, words: string[], deps: ResolveDeps): Promi
       if (child) {
         persistent = [...persistent, ...(sub.options ?? []).filter((option) => option.isPersistent)];
         sub = await enter(child, words.slice(0, i + 1), deps);
+        path.push(toArray(child.name)[0] ?? word);
         used = new Set();
         argIndex = 0;
         continue;
@@ -212,6 +222,7 @@ async function walk(root: Subcommand, words: string[], deps: ResolveDeps): Promi
       canSubcommand: !argsStarted,
       afterDashDash,
       words,
+      path,
     },
   };
 }
@@ -227,6 +238,7 @@ function unknownCommand(words: string[]): Context {
     canSubcommand: false,
     afterDashDash: false,
     words,
+    path: [commandName(words[0] ?? "")],
   };
 }
 

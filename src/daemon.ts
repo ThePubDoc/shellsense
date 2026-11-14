@@ -4,10 +4,14 @@
 //
 //   shell → engine   H <pid> <PATH> <alias=value RS alias=value …>     hello, once per connection
 //                    Q <seq> <cursor> <cwd> <line>                     what would complete here?
+//                    I <history file> <history 0|1>                    once per connection, after H
+//                    X <cwd> <line>                                    this command line is about to run
+//                    D <cwd>                                           the shell changed into this folder
+//                    F                                                  forget all recorded history
 //                    L                                                  a new prompt started: drop cached generator output
 //                    P                                                  ping
 //                    S                                                  shut down
-//   engine → shell   R <seq> <final 0|1> <replaceStart> <complete 0|1> [RS <display> <description> <kind> <insert> <cursorBack> <matchStart> <matchLength>]…
+//   engine → shell   R <seq> <final 0|1> <replaceStart> <complete 0|1> [RS <display> <description> <kind> <insert> <cursorBack> <matchStart> <matchLength> <recent 0|1>]…
 //                    P <pid> <clients>
 
 import fs from "node:fs";
@@ -15,7 +19,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { clearGeneratorCache } from "./generators.ts";
+import { recordLine, seedFromHistory } from "./history.ts";
 import { suggest } from "./suggest.ts";
+import { Usage } from "./usage.ts";
 import type { Kind, Result } from "./types.ts";
 
 export const US = "\x1f";
@@ -39,7 +45,7 @@ const field = (value: string) => value.replace(/[\x00-\x1f\x7f]/g, " ");
 export function encodeResult(seq: number, result: Result, final: boolean): string {
   const head = ["R", seq, final ? 1 : 0, result.replaceStart, result.complete ? 1 : 0].join(US);
   const rows = result.items.map((item) =>
-    [field(item.display), field(item.description), KIND_CODE[item.kind], field(item.insert), item.cursorBack, item.matchStart, item.matchLength].join(US),
+    [field(item.display), field(item.description), KIND_CODE[item.kind], field(item.insert), item.cursorBack, item.matchStart, item.matchLength, item.recent ? 1 : 0].join(US),
   );
   return [head, ...rows].join(RS);
 }
@@ -48,6 +54,8 @@ interface Client {
   seq: number;
   env: NodeJS.ProcessEnv;
   aliases: Map<string, string>;
+  /** False when this shell has turned history off. */
+  history: boolean;
 }
 
 function isAlive(file: string): Promise<boolean> {
@@ -90,9 +98,14 @@ export async function runDaemon(): Promise<void> {
   }
   fs.chmodSync(file, 0o600);
 
+  // What was used before, kept next to the socket. One store for all shells.
+  const usage = new Usage(path.join(path.dirname(file), "usage.json"));
+  let seeding = false;
+
   let clients = 0;
   let idle: NodeJS.Timeout | undefined;
   const shutdown = () => {
+    usage.save();
     try {
       fs.unlinkSync(file);
     } catch {
@@ -116,7 +129,7 @@ export async function runDaemon(): Promise<void> {
   server.on("connection", (socket) => {
     clients++;
     armIdle();
-    const client: Client = { seq: 0, env: { ...process.env }, aliases: new Map() };
+    const client: Client = { seq: 0, env: { ...process.env }, aliases: new Map(), history: true };
     const write = (line: string) => {
       if (!socket.destroyed) socket.write(`${line}\n`);
     };
@@ -139,7 +152,14 @@ export async function runDaemon(): Promise<void> {
           const cwd = parts[3] ?? "";
           if (!Number.isInteger(seq) || !Number.isInteger(cursor) || !path.isAbsolute(cwd)) return;
           client.seq = seq;
-          const request = { line: parts.slice(4).join(US).replaceAll(GS, "\n"), cursor, cwd, env: client.env, aliases: client.aliases };
+          const request = {
+            line: parts.slice(4).join(US).replaceAll(GS, "\n"),
+            cursor,
+            cwd,
+            env: client.env,
+            aliases: client.aliases,
+            usage: client.history ? usage : undefined,
+          };
           const reply = (result: Result, final: boolean) => {
             // The shell has moved on when a newer query arrived; an old answer would only flicker.
             if (client.seq === seq) write(encodeResult(seq, result, final));
@@ -150,6 +170,30 @@ export async function runDaemon(): Promise<void> {
           });
           break;
         }
+        case "I": {
+          client.history = parts[2] !== "0";
+          const historyFile = parts[1] ?? "";
+          // The first shell to connect brings its history file, so ranking is useful from the start.
+          if (client.history && !usage.seeded && !seeding && path.isAbsolute(historyFile)) {
+            seeding = true;
+            seedFromHistory(historyFile, client.aliases, usage)
+              .catch((error) => console.error(new Date().toISOString(), "reading history failed", error))
+              .finally(() => (seeding = false));
+          }
+          break;
+        }
+        case "X": {
+          const cwd = parts[1] ?? "";
+          if (!client.history || !path.isAbsolute(cwd)) return;
+          recordLine(parts.slice(2).join(US).replaceAll(GS, "\n"), cwd, client.aliases, usage).catch(() => {});
+          break;
+        }
+        case "D":
+          if (client.history && parts[1] && path.isAbsolute(parts[1])) usage.recordPath(parts[1]);
+          break;
+        case "F":
+          usage.clear();
+          break;
         case "L":
           clearGeneratorCache();
           break;

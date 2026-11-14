@@ -20,6 +20,7 @@ const USAGE = `shellsense — autocomplete popup for the terminal
   shellsense status            show whether the engine is running
   shellsense stop              stop the engine (the next prompt starts a fresh one)
   shellsense suggest <line>    print what would be suggested at the end of <line>
+  shellsense forget            erase what shellsense remembers about what you used
   shellsense init zsh          print the line that loads the popup, to place it yourself
   shellsense daemon [--foreground]   start the engine (shells do this themselves)
 `;
@@ -73,6 +74,14 @@ async function main(): Promise<number> {
       const code = uninstall();
       await ask("S", false);
       return code;
+    }
+
+    case "forget": {
+      // Tell a running engine to drop what it holds in memory, and remove the file in any case.
+      await ask("F", false);
+      fs.rmSync(path.join(path.dirname(socketPath()), "usage.json"), { force: true });
+      console.log("Forgotten. Ranking starts from scratch.");
+      return 0;
     }
 
     case "init":

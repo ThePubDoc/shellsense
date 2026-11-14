@@ -9,7 +9,7 @@
 # previous bindings come back, so nothing changes for a line that has no popup.
 
 [[ -o interactive ]] || return 0
-autoload -Uz is-at-least add-zle-hook-widget
+autoload -Uz is-at-least add-zle-hook-widget add-zsh-hook
 if ! is-at-least 5.9; then
   print -u2 "shellsense: zsh 5.9 or later is required (this is $ZSH_VERSION)"
   return 0
@@ -26,14 +26,17 @@ zmodload -F zsh/files b:zf_rm 2>/dev/null
 # "insert": Enter inserts the highlighted row while a word is being typed. "run": Enter always
 # runs the line unless a row was picked with the arrow keys.
 : ${SHELLSENSE_ENTER:=insert}
+: ${SHELLSENSE_HISTORY:=1}       # 1 = what you ran and where you went is remembered (as hashes) and ranked first
 : ${SHELLSENSE_ICONS:=auto}      # auto | nerd | dots | none   (auto = nerd when powerlevel10k says a Nerd Font is in use)
 : ${SHELLSENSE_THEME:=auto}      # auto | dark | light         (auto = shades derived from the terminal's own colours)
-: ${SHELLSENSE_ACCENT:=4}        # colour of the selection bar and of the typed characters; 4 is the theme's blue
-: ${SHELLSENSE_BOX:=rounded}     # rounded = outlined box | card = outlined and filled | flat = filled panel, no outline
+: ${SHELLSENSE_ACCENT:=12}       # colour of the highlighted row and of the typed characters; 12 is the palette's bright blue
+: ${SHELLSENSE_BOX:=floating}    # floating = filled card with a shadow | rounded = outlined box | card = outlined and filled | flat = plain panel
 : ${SHELLSENSE_HINTS:=1}         # 1 = the bottom edge says what Enter will do and where you are in the list
+: ${SHELLSENSE_DETAIL:=1}        # 1 = a line under the list shows the highlighted row's description in full, when rows cut it short
 : ${SHELLSENSE_PADDING:=1}       # flat only: 1 = half-height padding above and below the list
 # Any of these overrides one shade of the theme. Values are zsh colours: 0-255 or #rrggbb.
-#   SHELLSENSE_COLOR_PANEL  SHELLSENSE_COLOR_SELECTED  SHELLSENSE_COLOR_DIM  SHELLSENSE_COLOR_THUMB  SHELLSENSE_COLOR_BORDER
+#   SHELLSENSE_COLOR_PANEL  SHELLSENSE_COLOR_SELECTED  SHELLSENSE_COLOR_SELECTED_TEXT  SHELLSENSE_COLOR_DIM
+#   SHELLSENSE_COLOR_THUMB  SHELLSENSE_COLOR_BORDER  SHELLSENSE_COLOR_STRIP  SHELLSENSE_COLOR_SHADOW
 
 # ---- state ---------------------------------------------------------------------------------
 
@@ -45,9 +48,16 @@ typeset -gi _shellsense_rstart=0 _shellsense_dismissed=-1 _shellsense_namew=0 _s
 # Screen column where the buffer starts, learned from the terminal once per prompt; -1 = unknown.
 typeset -gi _shellsense_basecol=-1 _shellsense_asked=0 _shellsense_askw=0 _shellsense_keytimeout=0
 typeset -ga _shellsense_display _shellsense_desc _shellsense_kind _shellsense_insert _shellsense_back
-typeset -ga _shellsense_mstart _shellsense_mlen
+typeset -ga _shellsense_mstart _shellsense_mlen _shellsense_recent
 # Look: the four shades, the terminal's colours as "r g b" once known, and icon and tint per kind.
 typeset -g _shellsense_c_panel= _shellsense_c_sel= _shellsense_c_dim= _shellsense_c_thumb= _shellsense_c_border=
+# Text colours on the highlighted row, which is a solid bar of the accent colour.
+typeset -g _shellsense_c_selfg= _shellsense_c_seldim=
+# Floating card only: the footer strip and the shadow.
+typeset -g _shellsense_c_strip= _shellsense_c_shadow=
+typeset -gA _shellsense_label
+_shellsense_label=( s subcommand o option a value f file d folder b branch p package )
+typeset -gi _shellsense_caps=0
 typeset -g _shellsense_bg_rgb=${_shellsense_bg_rgb:-} _shellsense_fg_rgb=${_shellsense_fg_rgb:-} _shellsense_accent_rgb=${_shellsense_accent_rgb:-}
 typeset -gi _shellsense_asked_colors=0
 typeset -gA _shellsense_glyph _shellsense_tint
@@ -83,6 +93,7 @@ _shellsense_hello() {
   done
   _shellsense_naliases=${#aliases}
   _shellsense_send "H${_shellsense_us}$$${_shellsense_us}${PATH}${_shellsense_us}${(pj:\x1e:)pairs}"
+  _shellsense_send "I${_shellsense_us}${HISTFILE}${_shellsense_us}${SHELLSENSE_HISTORY}"
 }
 
 _shellsense_connect() {
@@ -143,13 +154,13 @@ _shellsense_handle() {
   (( _shellsense_visible && _shellsense_nav )) && keep=$_shellsense_insert[_shellsense_sel]
 
   _shellsense_display=() _shellsense_desc=() _shellsense_kind=() _shellsense_insert=() _shellsense_back=()
-  _shellsense_mstart=() _shellsense_mlen=()
+  _shellsense_mstart=() _shellsense_mlen=() _shellsense_recent=()
   _shellsense_namew=0 _shellsense_descw=0
   for (( i = 2; i <= $#records; i++ )); do
     f=("${(@ps:\x1f:)records[i]}")
     _shellsense_display+=("$f[1]") _shellsense_desc+=("$f[2]") _shellsense_kind+=("$f[3]")
     _shellsense_insert+=("$f[4]") _shellsense_back+=("${f[5]:-0}")
-    _shellsense_mstart+=("${f[6]:-0}") _shellsense_mlen+=("${f[7]:-0}")
+    _shellsense_mstart+=("${f[6]:-0}") _shellsense_mlen+=("${f[7]:-0}") _shellsense_recent+=("${f[8]:-0}")
     w=${(m)#f[1]}; (( w > _shellsense_namew )) && _shellsense_namew=$w
     w=${(m)#f[2]}; (( w > _shellsense_descw )) && _shellsense_descw=$w
   done
@@ -201,36 +212,9 @@ _shellsense_await() {
 
 # ---- drawing -------------------------------------------------------------------------------
 
-_shellsense_render() {
-  emulate -L zsh
-  local -i n=$#_shellsense_insert
-  local -i rows=$(( n < SHELLSENSE_MAX_ROWS ? n : SHELLSENSE_MAX_ROWS ))
-  (( rows > 0 )) || return 0
-  (( _shellsense_sel < _shellsense_top )) && _shellsense_top=$_shellsense_sel
-  (( _shellsense_sel >= _shellsense_top + rows )) && _shellsense_top=$(( _shellsense_sel - rows + 1 ))
-
-  # A row is: left edge, icon, name, description, right edge. With an outline the edges are the
-  # border plus a space inside it; without one they are a single cell each.
-  local -i outline=1
-  [[ $SHELLSENSE_BOX == flat ]] && outline=0
-  local -i lead=$(( outline + 1 + ($#_shellsense_glyph ? 2 : 0) ))
-  # Fit the two columns into the terminal: shrink the description first, then the name.
-  local -i namew=$(( _shellsense_namew > 34 ? 34 : _shellsense_namew ))
-  local -i descw=$(( _shellsense_descw > 52 ? 52 : _shellsense_descw ))
-  local -i maxw=$(( COLUMNS - 1 )) total
-  total=$(( lead + namew + (descw > 0 ? descw + 3 : 0) + 2 ))
-  if (( total > maxw && descw > 0 )); then
-    descw=$(( descw - (total - maxw) ))
-    (( descw < 10 )) && descw=0
-    total=$(( lead + namew + (descw > 0 ? descw + 3 : 0) + 2 ))
-  fi
-  if (( total > maxw )); then
-    namew=$(( maxw - lead - 2 ))
-    (( namew < 1 )) && return 0
-    total=$maxw
-  fi
-
-  # Line the names up under the word being completed.
+# Where the popup starts so that names line up under the word being completed.
+# Arguments: columns in front of the name, total width, last usable column. Sets REPLY.
+_shellsense_anchor() {
   local -i col=0
   if (( _shellsense_basecol >= 0 )); then
     local before=${BUFFER[1,_shellsense_rstart]}
@@ -239,10 +223,194 @@ _shellsense_render() {
     else
       col=$(( (_shellsense_basecol + ${(m)#before}) % COLUMNS ))
     fi
-    col=$(( col - lead ))
+    col=$(( col - $1 ))
   fi
-  (( col + total > maxw )) && col=$(( maxw - total ))
+  (( col + $2 > $3 )) && col=$(( $3 - $2 ))
   (( col < 0 )) && col=0
+  REPLY=$col
+}
+
+# The floating card: a filled panel with half-height padding on top, a footer strip, and a
+# shadow one half-cell to the right and below, which is what lifts it off the terminal.
+_shellsense_render_floating() {
+  emulate -L zsh
+  local -i n=$#_shellsense_insert
+  local -i rows=$(( n < SHELLSENSE_MAX_ROWS ? n : SHELLSENSE_MAX_ROWS ))
+  (( rows > 0 )) || return 0
+  (( _shellsense_sel < _shellsense_top )) && _shellsense_top=$_shellsense_sel
+  (( _shellsense_sel >= _shellsense_top + rows )) && _shellsense_top=$(( _shellsense_sel - rows + 1 ))
+
+  # A row is: margin, bar end, icon, name, description (right-aligned), bar end, margin.
+  local -i lead=$(( 2 + ($#_shellsense_glyph ? 2 : 0) ))
+  local -i namew=$(( _shellsense_namew > 30 ? 30 : _shellsense_namew ))
+  local -i descw=$(( _shellsense_descw > 42 ? 42 : _shellsense_descw ))
+  # One column stays free for the shadow.
+  local -i maxw=$(( COLUMNS - 2 )) total
+  total=$(( lead + namew + (descw > 0 ? descw + 2 : 0) + 2 ))
+  if (( total > maxw && descw > 0 )); then
+    descw=$(( descw - (total - maxw) ))
+    (( descw < 10 )) && descw=0
+    total=$(( lead + namew + (descw > 0 ? descw + 2 : 0) + 2 ))
+  fi
+  if (( total > maxw )); then
+    namew=$(( maxw - lead - 2 ))
+    (( namew < 1 )) && return 0
+    total=$maxw
+  fi
+  # A card of two short names would be too narrow for its footer, so there is a minimum width.
+  local -i least=$(( maxw < 40 ? maxw : 40 ))
+  if (( SHELLSENSE_HINTS && total < least )); then
+    namew=$(( namew + least - total ))
+    total=$least
+  fi
+
+  local REPLY
+  _shellsense_anchor $lead $total $maxw
+  local -i col=$REPLY
+
+  local -i thumb=0 thumbat=0
+  if (( n > rows )); then
+    thumb=$(( rows * rows / n ))
+    (( thumb < 1 )) && thumb=1
+    thumbat=$(( (_shellsense_top - 1) * (rows - thumb) / (n - rows) ))
+  fi
+
+  local other=$POSTDISPLAY
+  [[ -n $_shellsense_post && $other == *"$_shellsense_post" ]] && other=${other%"$_shellsense_post"}
+  region_highlight=( ${region_highlight:#*memo=shellsense*} )
+
+  local panel=$_shellsense_c_panel strip=$_shellsense_c_strip shadow=$_shellsense_c_shadow
+  local accent=$SHELLSENSE_ACCENT dim=$_shellsense_c_dim bar=$_shellsense_c_sel
+  local pad=${(l:col:):-} post= name padded desc kind bg fg bold descfg
+  local -i base=$(( $#BUFFER + $#other )) i r=0 ms ml sel
+
+  post+=$'\n'$pad
+  _shellsense_put "${(l:total::▄:):-}" "$panel"
+
+  for (( i = _shellsense_top; i < _shellsense_top + rows; i++, r++ )); do
+    post+=$'\n'$pad
+    sel=$(( i == _shellsense_sel ))
+    bg=$panel fg= bold= descfg=$dim
+    (( sel )) && bg=$bar fg=$_shellsense_c_selfg bold=1 descfg=$_shellsense_c_seldim
+
+    _shellsense_put " " "" "$panel"
+    if (( sel && _shellsense_caps )); then _shellsense_put $'\ue0b6' "$bar" "$panel"; else _shellsense_put " " "" "$bg"; fi
+
+    if (( $#_shellsense_glyph )); then
+      kind=$_shellsense_kind[i]
+      if (( sel )); then
+        _shellsense_put "${_shellsense_glyph[$kind]:-$_shellsense_glyph[a]} " "$fg" "$bg"
+      else
+        _shellsense_put "${_shellsense_glyph[$kind]:-$_shellsense_glyph[a]} " "${_shellsense_tint[$kind]:-$_shellsense_tint[a]}" "$bg"
+      fi
+    fi
+
+    name=$_shellsense_display[i]
+    (( ${(m)#name} > namew )) && name="${(mr:namew-1:)name}…"
+    ms=$_shellsense_mstart[i] ml=$_shellsense_mlen[i]
+    (( ms + ml > $#name )) && ml=$(( $#name - ms ))
+    padded=${(mr:namew:)name}
+    if (( ml > 0 && ! sel )); then
+      _shellsense_put "${padded[1,ms]}" "$fg" "$bg" "$bold"
+      _shellsense_put "${padded[ms+1,ms+ml]}" "$accent" "$bg" 1
+      _shellsense_put "${padded[ms+ml+1,-1]}" "$fg" "$bg" "$bold"
+    else
+      _shellsense_put "$padded" "$fg" "$bg" "$bold"
+    fi
+
+    if (( descw > 0 )); then
+      desc=$_shellsense_desc[i]
+      (( ${(m)#desc} > descw )) && desc="${(mr:descw-1:)desc}…"
+      _shellsense_put "  ${(ml:descw:)desc}" "$descfg" "$bg"
+    fi
+
+    if (( sel && _shellsense_caps )); then _shellsense_put $'\ue0b4' "$bar" "$panel"; else _shellsense_put " " "" "$bg"; fi
+    # The right margin doubles as the scrollbar.
+    if (( thumb > 0 && r >= thumbat && r < thumbat + thumb )); then
+      _shellsense_put " " "" "$_shellsense_c_thumb"
+    else
+      _shellsense_put " " "" "$panel"
+    fi
+    _shellsense_put "▌" "$shadow"
+  done
+
+  # Footer strip: what the highlighted row is, where it is in the list, and what the keys do.
+  local below=$panel
+  if (( SHELLSENSE_HINTS )); then
+    local left="  ${_shellsense_label[$_shellsense_kind[_shellsense_sel]]:-value}" right
+    (( _shellsense_recent[_shellsense_sel] )) && left+=" · recent"
+    (( n > rows )) && left+="   $_shellsense_sel/$n"
+    if _shellsense_enter_inserts; then right="↵ insert   esc close  "; else right="⇥ insert   ↵ run   esc close  "; fi
+    (( $#left + $#right + 2 > total )) && right="↵ ${${right#*↵ }%% *}  "
+    (( $#left + $#right + 2 > total )) && right=
+    (( $#left > total )) && left=${left[1,total]}
+    local -i gap=$(( total - $#left - $#right ))
+    post+=$'\n'$pad
+    _shellsense_put "$left${(l:gap:):-}$right" "$dim" "$strip"
+    _shellsense_put "▌" "$shadow"
+    below=$strip
+  fi
+
+  # Bottom: the lower half of the panel's last row, sitting on the shadow.
+  post+=$'\n'$pad
+  _shellsense_put "▀" "$below"
+  _shellsense_put "${(l:total-1::▀:):-}" "$below" "$shadow"
+  _shellsense_put "▘" "$shadow"
+
+  _shellsense_post=$post
+  POSTDISPLAY=$other$post
+}
+
+_shellsense_render() {
+  if [[ $SHELLSENSE_BOX == floating ]]; then
+    _shellsense_render_floating
+    return
+  fi
+  emulate -L zsh
+  local -i n=$#_shellsense_insert
+  local -i rows=$(( n < SHELLSENSE_MAX_ROWS ? n : SHELLSENSE_MAX_ROWS ))
+  (( rows > 0 )) || return 0
+  (( _shellsense_sel < _shellsense_top )) && _shellsense_top=$_shellsense_sel
+  (( _shellsense_sel >= _shellsense_top + rows )) && _shellsense_top=$(( _shellsense_sel - rows + 1 ))
+
+  # A row is: outline, margin, icon, name, description (right-aligned), margin, outline.
+  # The margins are where the highlighted row gets its rounded ends.
+  local -i outline=1
+  [[ $SHELLSENSE_BOX == flat ]] && outline=0
+  local -i lead=$(( outline + 1 + ($#_shellsense_glyph ? 2 : 0) ))
+  # Fit the two columns into the terminal: shrink the description first, then the name.
+  local -i namew=$(( _shellsense_namew > 30 ? 30 : _shellsense_namew ))
+  local -i descw=$(( _shellsense_descw > 42 ? 42 : _shellsense_descw ))
+  local -i maxw=$(( COLUMNS - 1 )) total
+  total=$(( lead + namew + (descw > 0 ? descw + 3 : 1) + 2 ))
+  if (( total > maxw && descw > 0 )); then
+    descw=$(( descw - (total - maxw) ))
+    (( descw < 10 )) && descw=0
+    total=$(( lead + namew + (descw > 0 ? descw + 3 : 1) + 2 ))
+  fi
+  if (( total > maxw )); then
+    namew=$(( maxw - lead - 3 ))
+    (( namew < 1 )) && return 0
+    total=$maxw
+  fi
+  # A box of two short names would be too narrow for the labels on its bottom edge.
+  local -i least=$(( maxw < 40 ? maxw : 40 ))
+  if (( outline && SHELLSENSE_HINTS && total < least )); then
+    namew=$(( namew + least - total ))
+    total=$least
+  fi
+
+  # Rows cut long descriptions short. When that happens to the highlighted row, its description
+  # is repeated in full under the list. The section is one height for the whole list, so the box
+  # only grows or shrinks when moving between rows that need it and rows that do not.
+  local -i inner=$(( total - 4 )) detail=0
+  if (( outline && SHELLSENSE_DETAIL && inner > 10 && ${(m)#_shellsense_desc[_shellsense_sel]} > descw )); then
+    detail=$(( _shellsense_descw > inner ? 2 : 1 ))
+  fi
+
+  local REPLY
+  _shellsense_anchor $lead $total $maxw
+  local -i col=$REPLY
 
   # The right edge doubles as a scrollbar when there are more rows than fit.
   local -i thumb=0 thumbat=0
@@ -261,7 +429,9 @@ _shellsense_render() {
   # terminal's own background shows through, which is what the rounded box wants.
   local fill= edge= line=$_shellsense_c_border accent=$SHELLSENSE_ACCENT dim=$_shellsense_c_dim
   [[ $SHELLSENSE_BOX == rounded ]] || fill=$_shellsense_c_panel edge=$_shellsense_c_panel
-  local pad=${(l:col:):-} post= name padded desc kind bg bold
+  # `solid`: the highlighted row is a bar of the accent colour with its own text colour.
+  local -i solid=$(( $#_shellsense_c_selfg > 0 )) sel
+  local pad=${(l:col:):-} post= name padded desc kind bg fg bold descfg
   local -i base=$(( $#BUFFER + $#other )) i r=0 ms ml inthumb
 
   if (( outline )); then
@@ -274,23 +444,30 @@ _shellsense_render() {
 
   for (( i = _shellsense_top; i < _shellsense_top + rows; i++, r++ )); do
     post+=$'\n'$pad
-    bg=$fill bold=
-    (( i == _shellsense_sel )) && bg=$_shellsense_c_sel bold=1
+    sel=$(( i == _shellsense_sel ))
+    bg=$fill fg= bold= descfg=$dim
+    (( sel )) && bg=$_shellsense_c_sel fg=$_shellsense_c_selfg bold=1 descfg=${_shellsense_c_seldim:-$dim}
     inthumb=$(( thumb > 0 && r >= thumbat && r < thumbat + thumb ))
 
-    # Left edge. The selected row is marked on the edge itself: a heavier stroke in the accent colour.
+    # Left outline. Without a solid bar the highlighted row is also marked here, by a heavier stroke.
     if (( outline )); then
-      if (( i == _shellsense_sel )); then _shellsense_put "┃" "$accent" "$edge"; else _shellsense_put "│" "$line" "$edge"; fi
-      _shellsense_put " " "" "$bg"
-    elif (( i == _shellsense_sel )); then
-      _shellsense_put "▎" "$accent" "$bg"
+      if (( sel && ! solid )); then _shellsense_put "┃" "$accent" "$edge"; else _shellsense_put "│" "$line" "$edge"; fi
+    fi
+    # Left margin: the rounded end of the bar, or plain background.
+    if (( sel && _shellsense_caps )); then
+      _shellsense_put $'' "$bg" "$fill"
     else
       _shellsense_put " " "" "$bg"
     fi
 
     if (( $#_shellsense_glyph )); then
       kind=$_shellsense_kind[i]
-      _shellsense_put "${_shellsense_glyph[$kind]:-$_shellsense_glyph[a]} " "${_shellsense_tint[$kind]:-$_shellsense_tint[a]}" "$bg"
+      # On a solid bar every colour but the bar's own text colour would fight with it.
+      if (( sel && solid )); then
+        _shellsense_put "${_shellsense_glyph[$kind]:-$_shellsense_glyph[a]} " "$fg" "$bg"
+      else
+        _shellsense_put "${_shellsense_glyph[$kind]:-$_shellsense_glyph[a]} " "${_shellsense_tint[$kind]:-$_shellsense_tint[a]}" "$bg"
+      fi
     fi
 
     # The name, with the characters the user typed picked out in the accent colour.
@@ -299,37 +476,70 @@ _shellsense_render() {
     ms=$_shellsense_mstart[i] ml=$_shellsense_mlen[i]
     (( ms + ml > $#name )) && ml=$(( $#name - ms ))
     padded=${(mr:namew:)name}
-    if (( ml > 0 )); then
-      _shellsense_put "${padded[1,ms]}" "" "$bg" "$bold"
+    if (( ml > 0 && ! (sel && solid) )); then
+      _shellsense_put "${padded[1,ms]}" "$fg" "$bg" "$bold"
       _shellsense_put "${padded[ms+1,ms+ml]}" "$accent" "$bg" 1
-      _shellsense_put "${padded[ms+ml+1,-1]}" "" "$bg" "$bold"
+      _shellsense_put "${padded[ms+ml+1,-1]}" "$fg" "$bg" "$bold"
     else
-      _shellsense_put "$padded" "" "$bg" "$bold"
+      _shellsense_put "$padded" "$fg" "$bg" "$bold"
     fi
 
+    # The description hugs the right edge, so short ones line up and long ones are cut at the same place.
     if (( descw > 0 )); then
       desc=$_shellsense_desc[i]
       (( ${(m)#desc} > descw )) && desc="${(mr:descw-1:)desc}…"
-      _shellsense_put "   ${(mr:descw:)desc} " "$dim" "$bg"
+      _shellsense_put "  ${(ml:descw:)desc} " "$descfg" "$bg"
     else
       _shellsense_put " " "" "$bg"
     fi
 
-    # Right edge, which is also the scrollbar.
+    # Right margin, then the right outline, which is also the scrollbar.
+    if (( sel && _shellsense_caps )); then
+      _shellsense_put $'' "$bg" "$fill"
+    else
+      _shellsense_put " " "" "$bg"
+    fi
     if (( outline )); then
       if (( inthumb )); then _shellsense_put "┃" "$dim" "$edge"; else _shellsense_put "│" "$line" "$edge"; fi
     elif (( inthumb )); then
       _shellsense_put " " "" "$_shellsense_c_thumb"
     else
-      _shellsense_put " " "" "$bg"
+      _shellsense_put " " "" "$fill"
     fi
   done
+
+  if (( detail )); then
+    # Wrap the highlighted row's description onto the detail lines, word by word.
+    local -a lines
+    local current= word
+    for word in ${(s: :)_shellsense_desc[_shellsense_sel]}; do
+      if [[ -z $current ]]; then
+        current=$word
+      elif (( ${(m)#current} + 1 + ${(m)#word} <= inner )); then
+        current+=" $word"
+      else
+        lines+=("$current")
+        current=$word
+      fi
+    done
+    [[ -n $current ]] && lines+=("$current")
+    (( $#lines > detail )) && lines[detail]="${(mr:inner-1:)lines[detail]}…"
+    post+=$'\n'$pad
+    _shellsense_put "├${(l:total-2::─:):-}┤" "$line" "$edge"
+    for (( i = 1; i <= detail; i++ )); do
+      post+=$'\n'$pad
+      _shellsense_put "│" "$line" "$edge"
+      _shellsense_put " ${(mr:inner:)lines[i]} " "$dim" "$fill"
+      _shellsense_put "│" "$line" "$edge"
+    done
+  fi
 
   if (( outline )); then
     # The bottom edge carries two small labels: the position in a long list, and what Enter does.
     local left= right=
     if (( SHELLSENSE_HINTS )); then
       (( n > rows )) && left=" $_shellsense_sel/$n "
+      (( _shellsense_recent[_shellsense_sel] )) && left=" recent${left:+ ·}${left:- }"
       if _shellsense_enter_inserts; then right=" ↵ insert "; else right=" ⇥ insert · ↵ run "; fi
       (( $#left + $#right + 4 > total )) && right=
       (( $#left + 4 > total )) && left=
@@ -379,37 +589,66 @@ _shellsense_look() {
   [[ $icons == auto ]] && { [[ ${POWERLEVEL9K_MODE-} == nerdfont* ]] && icons=nerd || icons=dots }
   _shellsense_glyph=()
   case $icons in
-    (nerd) _shellsense_glyph=( s $'\uf120' o $'\uf024' a $'\uf02b' f $'\uf15b' d $'\uf07b' b $'\uf126' p $'\uf1b2' ) ;;
+    (nerd) _shellsense_glyph=( s $'' o $'' a $'' f $'' d $'' b $'' p $'' ) ;;
     (dots) _shellsense_glyph=( s ● o ● a ● f ● d ● b ● p ● ) ;;
   esac
+  # The rounded ends of the highlighted row are half-circle glyphs that only Nerd Fonts have.
+  _shellsense_caps=0
+  [[ $icons == nerd ]] && _shellsense_caps=1
 
-  local -i dark=1
-  local -a b f
-  b=( ${=_shellsense_bg_rgb} ) f=( ${=_shellsense_fg_rgb} )
+  local -i dark=1 truecolor=0
+  local -a b f accent ink
+  b=( ${=_shellsense_bg_rgb} ) f=( ${=_shellsense_fg_rgb} ) accent=( ${=_shellsense_accent_rgb} )
+  if [[ $SHELLSENSE_ACCENT == '#'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F] ]]; then
+    accent=( $(( 16#${SHELLSENSE_ACCENT[2,3]} )) $(( 16#${SHELLSENSE_ACCENT[4,5]} )) $(( 16#${SHELLSENSE_ACCENT[6,7]} )) )
+  fi
   if [[ $SHELLSENSE_THEME == light ]]; then
     dark=0
   elif [[ $SHELLSENSE_THEME == auto ]] && (( $#b == 3 )); then
     (( (b[1] * 299 + b[2] * 587 + b[3] * 114) / 1000 >= 128 )) && dark=0
   fi
-  if [[ $SHELLSENSE_THEME == auto && ${COLORTERM-} == (truecolor|24bit) ]] && (( $#b == 3 )); then
+  [[ $SHELLSENSE_THEME == auto && ${COLORTERM-} == (truecolor|24bit) ]] && (( $#b == 3 )) && truecolor=1
+
+  # Shades of the box: the terminal's own background nudged towards its foreground, so the
+  # popup belongs to whatever theme is in use. Without those colours, fixed 256-colour shades.
+  if (( truecolor )); then
     (( $#f == 3 )) || { (( dark )) && f=(220 220 220) || f=(40 40 40) }
-    local -a accent
-    accent=( ${=_shellsense_accent_rgb} )
-    _shellsense_mix $b $f 8;  _shellsense_c_panel=$REPLY
+    _shellsense_mix $b $f 9;  _shellsense_c_panel=$REPLY
+    _shellsense_mix $b $f 15; _shellsense_c_strip=$REPLY
     _shellsense_mix $b $f 30; _shellsense_c_thumb=$REPLY
     _shellsense_mix $b $f 30; _shellsense_c_border=$REPLY
     _shellsense_mix $f $b 42; _shellsense_c_dim=$REPLY
-    # The selected row is tinted with the accent colour when the terminal told us what that is.
-    if (( $#accent == 3 )); then _shellsense_mix $b $accent 26; else _shellsense_mix $b $f 18; fi
-    _shellsense_c_sel=$REPLY
+    _shellsense_mix $b 0 0 0 $(( dark ? 50 : 16 )); _shellsense_c_shadow=$REPLY
   elif (( dark )); then
-    _shellsense_c_panel=236 _shellsense_c_sel=239 _shellsense_c_thumb=243 _shellsense_c_dim=246 _shellsense_c_border=241
+    _shellsense_c_panel=236 _shellsense_c_strip=238 _shellsense_c_thumb=243 _shellsense_c_dim=246
+    _shellsense_c_border=241 _shellsense_c_shadow=233
   else
-    _shellsense_c_panel=254 _shellsense_c_sel=251 _shellsense_c_thumb=246 _shellsense_c_dim=243 _shellsense_c_border=248
+    _shellsense_c_panel=254 _shellsense_c_strip=252 _shellsense_c_thumb=246 _shellsense_c_dim=243
+    _shellsense_c_border=248 _shellsense_c_shadow=250
   fi
+
+  # The highlighted row is a solid bar of the accent colour. Its text is white unless the
+  # accent is too light for that, in which case it is dark.
+  _shellsense_c_sel=$SHELLSENSE_ACCENT
+  local -i light_accent=0
+  (( $#accent == 3 )) && (( (accent[1] * 299 + accent[2] * 587 + accent[3] * 114) / 1000 >= 165 )) && light_accent=1
+  if (( truecolor && $#accent == 3 )); then
+    if (( ! light_accent )); then ink=(255 255 255); elif (( dark )); then ink=( $b ); else ink=(30 30 30); fi
+    _shellsense_mix $ink $ink 0;     _shellsense_c_selfg=$REPLY
+    _shellsense_mix $ink $accent 28; _shellsense_c_seldim=$REPLY
+  else
+    _shellsense_c_selfg=$(( light_accent ? 0 : 15 ))
+    _shellsense_c_seldim=$_shellsense_c_selfg
+  fi
+
   _shellsense_c_border=${SHELLSENSE_COLOR_BORDER:-$_shellsense_c_border}
   _shellsense_c_panel=${SHELLSENSE_COLOR_PANEL:-$_shellsense_c_panel}
+  _shellsense_c_strip=${SHELLSENSE_COLOR_STRIP:-$_shellsense_c_strip}
+  _shellsense_c_shadow=${SHELLSENSE_COLOR_SHADOW:-$_shellsense_c_shadow}
   _shellsense_c_sel=${SHELLSENSE_COLOR_SELECTED:-$_shellsense_c_sel}
+  if [[ -n $SHELLSENSE_COLOR_SELECTED_TEXT ]]; then
+    _shellsense_c_selfg=$SHELLSENSE_COLOR_SELECTED_TEXT _shellsense_c_seldim=$SHELLSENSE_COLOR_SELECTED_TEXT
+  fi
   _shellsense_c_thumb=${SHELLSENSE_COLOR_THUMB:-$_shellsense_c_thumb}
   _shellsense_c_dim=${SHELLSENSE_COLOR_DIM:-$_shellsense_c_dim}
   _shellsense_tint=( s 5 o 3 a 6 f $_shellsense_c_dim d 4 b 2 p 1 )
@@ -725,6 +964,22 @@ _shellsense_line_finish() {
   return 0
 }
 
+# ---- history -------------------------------------------------------------------------------
+
+# Tells the engine what is about to run and where, so it can rank it first next time. A line
+# that starts with a space is left out, the usual way of keeping a command out of history.
+_shellsense_preexec() {
+  [[ $SHELLSENSE_HISTORY == 0 || -z $1 || $1 == ' '* ]] && return 0
+  _shellsense_send "X${_shellsense_us}${PWD}${_shellsense_us}${1//$'\n'/$_shellsense_gs}"
+  return 0
+}
+
+# Covers every way of changing folder, not only `cd`: auto_cd, pushd, jump tools.
+_shellsense_chpwd() {
+  [[ $SHELLSENSE_HISTORY == 0 ]] || _shellsense_send "D${_shellsense_us}${PWD}"
+  return 0
+}
+
 zle -N _shellsense_recv
 zle -N _shellsense_line_init
 zle -N _shellsense_pre_redraw
@@ -740,6 +995,8 @@ zle -N shellsense-color-report
 add-zle-hook-widget line-init _shellsense_line_init
 add-zle-hook-widget line-pre-redraw _shellsense_pre_redraw
 add-zle-hook-widget line-finish _shellsense_line_finish
+add-zsh-hook preexec _shellsense_preexec
+add-zsh-hook chpwd _shellsense_chpwd
 bindkey -M main $'\e[?' shellsense-cursor-report
 bindkey -M main $'\e]1' shellsense-color-report
 bindkey -M main $'\e]4' shellsense-color-report
